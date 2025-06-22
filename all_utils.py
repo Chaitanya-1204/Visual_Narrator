@@ -15,18 +15,20 @@ def build_json_data(file_path , output_file):
     simplified_data = []
     for img in data["images"]:
         image_id = img["id"]
-        entry = {
-            "image_id": image_id,
-            "file_name": img["file_name"],
-            "height": img["height"],
-            "width": img["width"],
-            "captions": caption_dict.get(image_id, [])
-        }
-        simplified_data.append(entry)
+        captions = caption_dict.get(image_id, [])
+        for cap in captions:
+            entry = {
+                "image_id": image_id,
+                "file_name": img["file_name"],
+                "height": img["height"],
+                "width": img["width"],
+                "caption": cap 
+            }
+            simplified_data.append(entry)
         
     with open(output_file, "w") as f:
         json.dump(simplified_data, f, indent=2)
     
-    print("Saved data to " , output_file)
+    print("Saved data to " , output_file , " Total length : " , len(simplified_data))
     
 
