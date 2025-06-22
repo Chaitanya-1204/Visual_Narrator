@@ -195,3 +195,6 @@ cython_debug/
 
 coco/
 .hf_cache/
+
+train_data.json
+val_data.json

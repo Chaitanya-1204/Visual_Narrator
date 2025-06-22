@@ -28,6 +28,27 @@ pip install -r requirements.txt
 
 ## Datasets 
 
-It is MS COCO 2014 dataset
+
+For the iamge Captioning Part we are using MS COCO 2014 dataset 
+
+* Training data has 82783 images each with 5 captions 
+
+* Validation data has 40504 images each with 5 captions 
+
+### Folder Structure
+
+Organize the COCO dataset as follows:
+
+```
+coco/
+├── annotations/
+│   ├── captions_train2014.json
+│   └── captions_val2014.json
+├── train2014/
+│   └── COCO_train2014_000000000000.jpg
+└── val2014/
+    └── COCO_val2014_000000000000.jpg
+```
+
 
 
