@@ -99,9 +99,9 @@ def get_dataloaders(decoder_model_name):
     
     
     # Creating the dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
-    val_dataloader = DataLoader(val_subset, batch_size=16, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
-    test_dataloader = DataLoader(test_subset, batch_size=16, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    val_dataloader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    test_dataloader = DataLoader(test_subset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
     return train_dataloader, val_dataloader, test_dataloader , tokenizer
 
 def get_json_file():
