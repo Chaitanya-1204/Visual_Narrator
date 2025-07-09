@@ -198,3 +198,7 @@ coco/
 
 train_data.json
 val_data.json
+play.ipynb
+vit_opt350M.log
+.pt 
+

@@ -1,231 +1,129 @@
 import os
-os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), ".hf_cache")
+import logging
+
+logging.basicConfig(
+    filename="vit_opt350M.log",
+    filemode="a",
+    format="\n%(asctime)s | %(levelname)s\n%(message)s\n" + "-"*80,
+    level=logging.INFO
+)
+
+os.environ['HF_HOME'] = os.path.join(os.path.dirname(__file__), ".hf_cache")
+
 import torch 
 import torch.nn as nn
-
-
-# EVA-CLIP ViT Encoder class
-from transformers import CLIPModel, CLIPProcessor , ViTModel, ViTFeatureExtractor , T5Tokenizer, T5ForConditionalGeneration, AutoTokenizer, OPTForCausalLM , AutoModelForCausalLM
-
-class EVA_CLIP_ViTEncoder(nn.Module):
-    def __init__(self, model_name="BAAI/EVA-CLIP-ViT-g-14"):
-        super().__init__()
-        self.model = CLIPModel.from_pretrained(model_name)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
-
-    def forward(self, images):
-        # images should be raw PIL images or already preprocessed tensors
-        inputs = self.processor(images=images, return_tensors="pt")
-        outputs = self.model.vision_model(**inputs)
-        return outputs.last_hidden_state  # (B, num_patches+1, hidden_dim)
-
-
+from transformers import ViTModel, ViTImageProcessor ,  OPTForCausalLM 
 
 
 
 # ViT Encoder class
 class ViTEncoder(nn.Module):
     def __init__(self, model_name="google/vit-base-patch16-224-in21k"):
-        super().__init__()
+        super(ViTEncoder , self).__init__()
         self.model = ViTModel.from_pretrained(model_name)
-        self.feature_extractor = ViTFeatureExtractor.from_pretrained(model_name)
+        self.image_processor = ViTImageProcessor.from_pretrained(model_name)
 
-    def forward(self, images):
-        # images should be raw PIL images or already preprocessed tensors
-        inputs = self.feature_extractor(images=images, return_tensors="pt")
-        outputs = self.model(**inputs)
-        return outputs.last_hidden_state  # (B, num_patches+1, hidden_dim)
+    def forward(self, images , device):
+        
+        inputs = self.image_processor(images=images, return_tensors="pt", do_rescale=False)
+        inputs = inputs.to(device)  
 
+        outputs = self.model(**inputs) # (B, num_patches+1, hidden_dim)
+        context = outputs.last_hidden_state[: , 1: , :]  # (B, num_patches , hidden_dim) ignoring CLS token
+        return context 
+ 
+class OptDecoder(nn.Module):
+    def __init__(self, model="facebook/opt-350m", num_cross_attn_layers = 4, num_heads=8, dropout=0.1, ffn_dim=2048, device='cuda'):
+        super(OptDecoder, self).__init__()
+        self.model = OPTForCausalLM.from_pretrained(model)
+        hidden_dim = self.model.model.decoder.embed_tokens.embedding_dim  # usually 512 for opt-350m
 
-# CLIP ViT Encoder class
-class CLIPViTEncoder(nn.Module):
-    def __init__(self, model_name="openai/clip-vit-base-patch32"):
-        super().__init__()
-        self.model = CLIPModel.from_pretrained(model_name)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        # Project context from ViT (usually 768 dim) → decoder embedding dim (e.g., 512)
+        self.project_context = nn.Linear(768, hidden_dim).to(device)
 
-    def forward(self, images):
-        # images should be raw PIL images or already preprocessed tensors
-        inputs = self.processor(images=images, return_tensors="pt")
-        outputs = self.model.vision_model(**inputs)
-        return outputs.last_hidden_state  # (B, num_patches+1, hidden_dim)
+        # Cross-attention blocks
+        self.cross_attn_blocks = nn.ModuleList([
+            nn.ModuleDict({
+                "attn": nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout, batch_first=True).to(device),
+                "attn_ln": nn.LayerNorm(hidden_dim).to(device),
+                "ffn": nn.Sequential(
+                    nn.Linear(hidden_dim, ffn_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ffn_dim, hidden_dim)
+                ).to(device),
+                "ffn_ln": nn.LayerNorm(hidden_dim).to(device)
+            }) for _ in range(num_cross_attn_layers)
+        ])
+
+    def forward(self, context, input_ids=None, attention_mask=None, device='cuda'):
+        B, T = input_ids.shape
+        text_embeds = self.model.model.decoder.embed_tokens(input_ids.to(device))  # (B, T, D)
+        prefix_length = context.shape[1]
+
+     
+        context = self.project_context(context)  # (B, 196, D)
+        output = text_embeds  # initialize with decoder input
+        
+
+        for block in self.cross_attn_blocks:
+            attn_out, _ = block["attn"](query=output, key=context, value=context)  # ✔️ correct direction
+            output = block["attn_ln"](output + attn_out)
+
+            ffn_out = block["ffn"](output)
+            output = block["ffn_ln"](output + ffn_out)
+
+        # # Concatenate projected + attended image tokens with text
+        # full_inputs = torch.cat([context, text_embeds], dim=1)  # (B, prefix+T, D)
+        full_inputs = output
+        # # Masks
+        # prefix_mask = torch.ones((B, prefix_length), dtype=attention_mask.dtype, device=device)
+        # full_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+        
+        full_mask = attention_mask
+
+        # # Labels
+        # prefix_labels = torch.full((B, prefix_length), -100, dtype=input_ids.dtype, device=device)
+        # full_labels = torch.cat([prefix_labels, input_ids], dim=1)
+
+        full_labels = input_ids
+        outputs = self.model(inputs_embeds=full_inputs, attention_mask=full_mask, labels=full_labels)
+        return outputs.loss, outputs.logits
     
-
-class QFormer(nn.Module):
-    def __init__(self, vision_dim=768, hidden_dim=512, num_query_tokens=32, num_layers=6, num_heads=8):
-        super().__init__()
-        self.query_tokens = nn.Parameter(torch.randn(1, num_query_tokens, hidden_dim))
-        self.vision_proj = nn.Linear(vision_dim, hidden_dim)
-
-        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-    def forward(self, vision_feats):
-        """
-        vision_feats: Tensor of shape (B, N_patches, vision_dim)
-        returns: Q-former outputs of shape (B, num_query_tokens, hidden_dim)
-        """
-        B = vision_feats.size(0)
-
-        # Project vision features to decoder dimension
-        vision_feats_proj = self.vision_proj(vision_feats)
-
-        # Expand query tokens across the batch
-        queries = self.query_tokens.expand(B, -1, -1)  # (B, num_query_tokens, hidden_dim)
-
-        # Concatenate vision_feats_proj and queries for attention context
-        # Each query attends to the entire vision context
-        combined_input = torch.cat([queries, vision_feats_proj], dim=1)
-
-        # Apply Transformer encoder
-        attended = self.transformer_encoder(combined_input)
-
-        # Return only the updated query embeddings
-        return attended[:, :self.query_tokens.shape[1], :]  # (B, num_query_tokens, hidden_dim)
-
-
-class T5Decoder(nn.Module):
-    def __init__(self, model_name="google/flan-t5-base"):
-        super().__init__()
-        self.tokenizer = T5Tokenizer.from_pretrained(model_name)
-        self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-
-    def forward(self, inputs_embeds, decoder_input_ids=None, labels=None):
-        return self.model(
-            inputs_embeds=inputs_embeds,
-            decoder_input_ids=decoder_input_ids,
-            labels=labels
-        )
-
-    def generate(self, inputs_embeds, max_length=30, num_beams=3):
-        return self.model.generate(inputs_embeds=inputs_embeds, max_length=max_length, num_beams=num_beams)
-
-    def decode(self, generated_ids):
-        return [self.tokenizer.decode(g, skip_special_tokens=True) for g in generated_ids]
-
-class GPT2Decoder(nn.Module):
-    def __init__(self, model_name="gpt2"):
-        super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
-
-    def forward(self, inputs_embeds, attention_mask=None, labels=None):
-        return self.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            labels=labels
-        )
-
-    def generate(self, inputs_embeds, attention_mask=None, max_length=30, num_beams=3):
-        return self.model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_length=max_length,
-            num_beams=num_beams,
-            pad_token_id=self.tokenizer.pad_token_id
-        )
-
-    def decode(self, generated_ids):
-        return [self.tokenizer.decode(g, skip_special_tokens=True) for g in generated_ids]
-
-class OPTDecoder(nn.Module):
-    def __init__(self, model_name="facebook/opt-2.7b"):
-        super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = OPTForCausalLM.from_pretrained(model_name)
-
-    def forward(self, inputs_embeds, attention_mask=None, labels=None):
-        return self.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            labels=labels
-        )
-
-    def generate(self, inputs_embeds, attention_mask=None, max_length=30, num_beams=3):
-        return self.model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_length=max_length,
-            num_beams=num_beams,
-            pad_token_id=self.tokenizer.pad_token_id
-        )
-
-    def decode(self, generated_ids):
-        return [self.tokenizer.decode(g, skip_special_tokens=True) for g in generated_ids]
-
+    
 class ImageCaptioningModel(nn.Module):
-    def __init__(self, vision_encoder, q_former, decoder, decoder_type="t5"):
-        super().__init__()
-        self.vision_encoder = vision_encoder
-        self.q_former = q_former
+    def __init__(self, encoder, decoder):
+        super(ImageCaptioningModel, self).__init__()
+        self.encoder = encoder
         self.decoder = decoder
-        self.decoder_type = decoder_type.lower()
+        
+        self.projection = nn.Linear(
+            encoder.model.config.hidden_size,
+            decoder.model.model.decoder.embed_tokens.embedding_dim  # Match OPT embedding size
+        )
+        
 
-    def forward(self, images, labels=None, max_length=30, num_beams=3):
-        # Step 1: Extract visual features
-        vision_feats = self.vision_encoder(images)  # (B, N_patches, vision_dim)
-
-        # Step 2: Pass through Q-Former
-        query_outputs = self.q_former(vision_feats)  # (B, num_query_tokens, hidden_dim)
-
-        # === TRAINING MODE ===
-        if labels is not None:
-            if self.decoder_type == "t5":
-                output = self.decoder(
-                    inputs_embeds=query_outputs,
-                    labels=labels
-                )
-            elif self.decoder_type in {"gpt2", "opt"}:
-                attention_mask = torch.ones(query_outputs.size()[:-1], dtype=torch.long).to(query_outputs.device)
-                output = self.decoder(
-                    inputs_embeds=query_outputs,
-                    attention_mask=attention_mask,
-                    labels=labels
-                )
-            else:
-                raise ValueError(f"Unsupported decoder type: {self.decoder_type}")
-            return output  # includes loss + logits
-
-        # === INFERENCE MODE ===
-        else:
-            if self.decoder_type == "t5":
-                generated_ids = self.decoder.generate(
-                    inputs_embeds=query_outputs,
-                    max_length=max_length,
-                    num_beams=num_beams
-                )
-            elif self.decoder_type in {"gpt2", "opt"}:
-                attention_mask = torch.ones(query_outputs.size()[:-1], dtype=torch.long).to(query_outputs.device)
-                generated_ids = self.decoder.generate(
-                    inputs_embeds=query_outputs,
-                    attention_mask=attention_mask,
-                    max_length=max_length,
-                    num_beams=num_beams
-                )
-            else:
-                raise ValueError(f"Unsupported decoder type: {self.decoder_type}")
-            
-            captions = self.decoder.decode(generated_ids)
-            return captions
+    def forward(self, images, input_ids, attention_mask, device):
+        context = self.encoder(images, device)
+    
+        
+        
+        loss, logits = self.decoder(context, input_ids, attention_mask, device=device)
+       
+        return loss, logits
+    
+ 
+ 
+    
+    
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total Parameters: {total_params:,}")
-    print(f"Trainable Parameters: {trainable_params:,}")
-    return total_params, trainable_params
-
-
-if __name__ == "__main__":
+    logging.info(f"Total Parameters: {total_params:,}")
+    logging.info(f"Trainable Parameters: {trainable_params:,}")
     
-    print("Counting parameters for ViT Encoder + OPT Decoder")
-    vision_encoder = ViTEncoder()
 
-    q_former = QFormer(vision_dim=768, hidden_dim=512)
- 
-    decoder = OPTDecoder()
-    
-    model = ImageCaptioningModel(vision_encoder, q_former, decoder, decoder_type="opt")
-    print("Image Captioning Model created")
-    count_parameters(model)
+
+
+
+
