@@ -200,5 +200,5 @@ train_data.json
 val_data.json
 play.ipynb
 vit_opt350M.log
-.pt 
+experimentation_1/vit_opt350M_best_model.pt
 

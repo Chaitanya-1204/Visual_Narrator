@@ -1,0 +1,6 @@
+train_data : "train_data.json"
+val_data : "val_data.json"
+
+pretrained_model : 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base_caption_capfilt_large.pth'
+
+

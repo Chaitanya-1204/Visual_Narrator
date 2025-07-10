@@ -12,9 +12,9 @@ logging.basicConfig(
 )
 
 # Importing necessary libraries
-from model import ImageCaptioningModel, ViTEncoder, OptDecoder , count_parameters
+from experimentation_1.model import ImageCaptioningModel, ViTEncoder, OptDecoder , count_parameters
 from data import get_dataloaders
-from all_utils import train_model , evaluate
+from experimentation_1.all_utils import train_model , evaluate
 
 import torch
 

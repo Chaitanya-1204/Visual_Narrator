@@ -113,9 +113,7 @@ class ImageCaptioningModel(nn.Module):
         return loss, logits
     
  
- 
-    
-    
+
 def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

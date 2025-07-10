@@ -4,7 +4,7 @@ from torchvision import transforms
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset, DataLoader, random_split
 import torch
-from all_utils import build_json_data
+from experimentation_1.all_utils import build_json_data
 import logging
 
 logging.basicConfig(
