@@ -1,15 +1,18 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json 
 from collections import defaultdict
 import torch 
 from tqdm import tqdm
 from transformers import get_cosine_schedule_with_warmup
-from torch.cuda.amp import autocast, GradScaler
 import logging
 from transformers import AutoTokenizer
 import random
-# Metrics imports
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-# from pycocoevalcap.cider.cider import Cider
+
+
 
 logging.basicConfig(
     filename="vit_opt350M.log",

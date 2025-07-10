@@ -1,10 +1,15 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from PIL import Image
 import os, json, random
 from torchvision import transforms
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset, DataLoader, random_split
 import torch
-from experimentation_1.all_utils import build_json_data
+from utils.all_utils import build_json_data
 import logging
 
 logging.basicConfig(
@@ -13,6 +18,10 @@ logging.basicConfig(
     format="\n%(asctime)s | %(levelname)s\n%(message)s\n" + "-"*80,
     level=logging.INFO
 )
+
+# Get root directory of project
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 class CocoCaptionDataset(Dataset):
     
@@ -99,14 +108,19 @@ def get_dataloaders(decoder_model_name):
     
     
     # Creating the dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    train_dataloader = DataLoader(train_dataset, 
+                                  batch_size=32, 
+                                  shuffle=True, 
+                                  num_workers=4, 
+                                  pin_memory=True, 
+                                  persistent_workers=True)
     val_dataloader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
     test_dataloader = DataLoader(test_subset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
     return train_dataloader, val_dataloader, test_dataloader , tokenizer
 
 def get_json_file():
     
-    annotations_train_file_path = "coco/annotations/captions_train2014.json"
+    annotations_train_file_path = "coco/annotations/captions_train2014.json"  
     annotations_val_file_path = "coco/annotations/captions_val2014.json"
 
     train_output_path = "train_data.json"
