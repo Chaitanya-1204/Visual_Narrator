@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 from functools import partial
 from timm.models.vision_transformer import PatchEmbed
-from timm.model.layers import DropPath , trunc_normal_
-
+from timm.layers import DropPath , trunc_normal_
 from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
 
 
@@ -85,7 +84,7 @@ class Block(nn.Module):
             
         )
         
-        self.drop_path = DropPath(drop_path if drop_path > 0. else nn.Identity())
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         
         self.norm2 = norm_layer(dim)
         

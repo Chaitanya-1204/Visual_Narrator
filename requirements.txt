@@ -1,6 +1,9 @@
 ruamel_yaml
-
-
+timm
+fairscale
 transformers
 datasets
 tqdm
+opencv-python
+nltk
+matplotlib

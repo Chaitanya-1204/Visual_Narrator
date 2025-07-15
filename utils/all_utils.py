@@ -1,6 +1,10 @@
 import sys
 import os
 
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.translate.bleu_score import corpus_bleu
+from pycocoevalcap.cider.cider import Cider
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json 
@@ -12,6 +16,7 @@ import logging
 from transformers import AutoTokenizer
 import random
 
+import math
 
 
 logging.basicConfig(
@@ -56,7 +61,7 @@ def build_json_data(file_path , output_file):
     logging.info("Saved data to %s Total length : %d", output_file, len(simplified_data))
     
     
-def train_one_epoch(model, dataloader, optimizer, scheduler, device):
+def train_one_epoch(model, dataloader, optimizer, epoch ,  device):
     
     """ 
         This function trains the model for one epoch.
@@ -65,9 +70,9 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device):
             model: The model to be trained.
             dataloader: The dataloader for the training data.
             optimizer: The optimizer for the model.
-            scheduler: The learning rate scheduler.
+            epoch : Epoch number 
             device: The device to run the model on (CPU or GPU).
-            scaler: The GradScaler for mixed precision training
+            
             
     """
     
@@ -76,20 +81,20 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device):
     progress = tqdm(dataloader, desc="Training", leave=False)
     for batch in progress:
         # Getting the batch data and moving it to the device
-        pixel_values = batch["pixel_values"].to(device)
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
+        image = batch['image']
+        image = image.to(device)
+        caption = batch['caption']
 
+        with torch.amp.autocast("cuda" , dtype=torch.bfloat16):
+            loss = model(image , caption)
         
-        loss, logits = model(images=pixel_values, input_ids=input_ids, attention_mask=attention_mask, device=device)
-
         # Backward pass and optimization with scaler
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
  
-        scheduler.step()
+    
 
         # Accumulating the loss
         total_loss += loss.item()
@@ -100,7 +105,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device):
     avg_loss = total_loss / len(dataloader)
     return avg_loss
 
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device  , config):
     """ 
         This function evaluates the model on the validation set or test set.
         
@@ -117,12 +122,13 @@ def evaluate(model, dataloader, device):
     
         for batch in tqdm(dataloader, desc="Evaluating"):
             # Getting the batch data and moving it to the device
-            pixel_values = batch["pixel_values"].to(device)
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
+            image = batch['image']
+            image = image.to(device)
+            
+            caption = batch['caption']
             
             # Forward pass
-            loss , logits = model(images=pixel_values, input_ids=input_ids, attention_mask=attention_mask , device = device)
+            loss  = model(image , caption)
             
             # Accumulating the loss
             total_loss += loss.item()
@@ -131,119 +137,69 @@ def evaluate(model, dataloader, device):
     avg_loss = total_loss / len(dataloader)
     return avg_loss
 
-def train_model(model, train_dataloader, val_dataloader, device, epochs, lr , tokenizer):
-    
-    """
-        This function trains the model for a specified number of epochs and evaluates it on the validation set after each epoch.
-        
-        Args:
-            model: The model to be trained.
-            train_dataloader: The dataloader for the training data.
-            val_dataloader: The dataloader for the validation data.
-            device: The device to run the model on (CPU or GPU).
-            epochs: The number of epochs to train the model.
-            lr: The learning rate for the optimizer.    
-    
-    """
-    model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
-    num_training_steps = len(train_dataloader) * epochs
-    num_warmup_steps = int(0.1 * num_training_steps)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps
+# Function to generate and log predicted/original captions for the first batch
+def generate_captions(model, data_loader, device, config):
+    model.eval()
+    data = next(iter(data_loader))
+    image = data['image'].to(device)
+    captions_gt = data['caption']
+
+    # Generate predictions
+    predictions = model.generate(
+        image,
+        sample=False,
+        num_beams=config['num_beams'],
+        max_length=config['max_length'],
+        min_length=config['min_length']
     )
 
-
-    patience = 3  # Early stopping patience
-    best_val_loss = float("inf")
-    epochs_without_improvement = 0
-    
-    # log_caption_predictions(model, val_dataloader.dataset, device, tokenizer=tokenizer)
-
-    for epoch in range(epochs):
-        logging.info("=" * 80)
-        logging.info(f"Epoch {epoch + 1}/{epochs}")
-        train_loss = train_one_epoch(model, train_dataloader, optimizer, scheduler, device)
-        val_loss = evaluate(model, val_dataloader, device)
-        logging.info(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-
-        # log_caption_predictions(model, val_dataloader.dataset, device, tokenizer=tokenizer)
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_without_improvement = 0
-            torch.save(model.state_dict(), "vit_opt350M_best_model.pt")
-            logging.info(">> Best model saved.")
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= patience:
-                logging.info(">> Early stopping triggered.")
-                break
-    logging.info("=" * 80)
-    
-def log_caption_predictions(model, val_dataset, device, tokenizer, num_samples=5 , max_length = 64):
-    model.eval()
-    indices = random.sample(range(len(val_dataset)), num_samples)
-    logging.info("Sample Caption Predictions (Ground Truth | Predicted):")
-    predictions = []
-    references = []
-
-    for idx in indices:
-        sample = val_dataset[idx]
-        image = sample["pixel_values"].unsqueeze(0).to(device)
-        gt_caption = sample["caption"]
-
-        with torch.no_grad():
-            context = model.encoder(image, device)
-            context = model.decoder.project_context(context)
-            
-            input_ids = torch.tensor([[tokenizer.bos_token_id]], dtype=torch.long).to(device)
-
-            for _ in range(max_length) :
-                text_embeds = model.decoder.model.model.decoder.embed_tokens(input_ids.to(device))
-                 
-                output = context 
-                for block in model.decoder.cross_attn_blocks:
-                    attn_out, _ = block["attn"](query=output, key=text_embeds, value=text_embeds)
-                    output = block["attn_ln"](output + attn_out)
-
-                    ffn_out = block["ffn"](output)
-                    output = block["ffn_ln"](output + ffn_out)
-                
-                full_input = torch.cat([output, text_embeds], dim=1)
-                attention_mask = torch.ones(full_input.shape[:2], dtype=torch.long).to(device)
-                outputs = model.decoder.model(inputs_embeds=full_input, attention_mask=attention_mask)
-                next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(0)  # (1, 1)
-                
-                input_ids = torch.cat([input_ids, next_token], dim=1)
-                # Stop if <eos>
-                if next_token.item() == tokenizer.eos_token_id:
-                    break
-            pred_caption = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-            
-                    
-            
-        predictions.append(pred_caption)
-        references.append(gt_caption)
-        logging.info(f"True: {gt_caption} || Pred: {pred_caption}")
-
-    avg_bleu, _ = compute_metrics(predictions, references)
-    logging.info(f"BLEU Score (avg): {avg_bleu:.4f}")
-
-# Metric computation function
-def compute_metrics(predictions, references):
     smoothie = SmoothingFunction().method4
-    bleu_scores = [sentence_bleu([ref.split()], pred.split(), smoothing_function=smoothie) for pred, ref in zip(predictions, references)]
+    bleu1_scores, bleu2_scores, bleu3_scores, bleu4_scores = [], [], [], []
+    gts, res = {}, {}
+    references, hypotheses = [], []
 
-    # Prepare for CIDEr
-    # cider_scorer = Cider()
-    # gts = {i: [references[i]] for i in range(len(references))}
-    # res = {i: [predictions[i]] for i in range(len(predictions))}
-    # cider_score, _ = cider_scorer.compute_score(gts, res)
+    for i, (pred, gt) in enumerate(zip(predictions, captions_gt)):
+        logging.info("Image %d\nOriginal: %s\nPredicted: %s", i, gt, pred)
+        reference = [gt.lower().split()]
+        hypothesis = pred.lower().split()
 
-    avg_bleu = sum(bleu_scores) / len(bleu_scores)
-    # return avg_bleu, cider_score
-    return avg_bleu, None
+        # For BLEU
+        references.append(reference)
+        hypotheses.append(hypothesis)
+
+        bleu1_scores.append(sentence_bleu(reference, hypothesis, weights=(1, 0, 0, 0), smoothing_function=smoothie))
+        bleu2_scores.append(sentence_bleu(reference, hypothesis, weights=(0.5, 0.5, 0, 0), smoothing_function=smoothie))
+        bleu3_scores.append(sentence_bleu(reference, hypothesis, weights=(0.33, 0.33, 0.33, 0), smoothing_function=smoothie))
+        bleu4_scores.append(sentence_bleu(reference, hypothesis, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smoothie))
+
+        # For CIDEr
+        gts[str(i)] = [gt]
+        res[str(i)] = [pred]
+
+    avg_bleu1 = sum(bleu1_scores) / len(bleu1_scores) if bleu1_scores else 0.0
+    avg_bleu2 = sum(bleu2_scores) / len(bleu2_scores) if bleu2_scores else 0.0
+    avg_bleu3 = sum(bleu3_scores) / len(bleu3_scores) if bleu3_scores else 0.0
+    avg_bleu4 = sum(bleu4_scores) / len(bleu4_scores) if bleu4_scores else 0.0
+
+    cider_scorer = Cider()
+    cider_score, _ = cider_scorer.compute_score(gts, res)
+
+    logging.info("Average BLEU-1: %.4f", avg_bleu1)
+    logging.info("Average BLEU-2: %.4f", avg_bleu2)
+    logging.info("Average BLEU-3: %.4f", avg_bleu3)
+    logging.info("Average BLEU-4: %.4f", avg_bleu4)
+    logging.info("Average CIDEr: %.4f", cider_score)
+
+
+def count_parameters(model):
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(f"Total parameters: {total:,}")
+    logging.info(f"Trainable parameters: {trainable:,}")
+
+def cosine_lr_schedule(optimizer, epoch, max_epoch, init_lr, min_lr):
+    """Decay the learning rate"""
+    lr = (init_lr - min_lr) * 0.5 * (1. + math.cos(math.pi * epoch / max_epoch)) + min_lr
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr

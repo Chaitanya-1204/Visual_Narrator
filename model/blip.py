@@ -1,19 +1,25 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch 
 import torch.nn as nn
-import os
+
 from torch.hub import download_url_to_file
 from urllib.parse import urlparse
 from timm.models.hub import download_cached_file
 from transformers import BertTokenizer
 
 
-from vit import VisionTransformer , interpolate_pos_embed
+from model.vit import VisionTransformer , interpolate_pos_embed
+from model.bert import BertConfig , BertModel , BertLMHeadModel
 
 
 def create_model(pretrained=None, **kwargs):
     model = BLIP(**kwargs)
     if pretrained:
-        model = load_checkpoint(model, pretrained)
+        model , msg = load_checkpoint(model, pretrained)
     return model
 
 def load_checkpoint(model, path_or_url):
@@ -84,7 +90,8 @@ class BLIP(nn.Module):
                 vit = "base" , 
                 vit_grad_ckpt = False , 
                 vit_ckpt_layer = 0 ,
-                prompt = "A picture of "):
+                prompt = "A picture of ",
+                bert_config = "bert_config.json"):
         
         
         super(BLIP , self).__init__()
@@ -92,4 +99,81 @@ class BLIP(nn.Module):
         self.visual_encoder , vision_width = create_vit(vit , image_size , vit_grad_ckpt , vit_ckpt_layer)
         
         self.tokenizer = init_tokenizer()
+        
+        bert_config = BertConfig.from_json_file(bert_config)
+        bert_config.encoder_width = vision_width
+        self.text_decoder = BertLMHeadModel(config=bert_config)
+        
+        self.prompt = prompt
+        self.prompt_length = len(self.tokenizer(self.prompt).input_ids) - 1
+        
+    def forward(self , image , caption):
+        
+        image_embeds = self.visual_encoder(image) 
+        image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)
+        
+        text = self.tokenizer(caption, padding='longest', truncation=True, max_length=40, return_tensors="pt").to(image.device) 
+        
+        text.input_ids[:,0] = self.tokenizer.bos_token_id
+        
+        decoder_targets = text.input_ids.masked_fill(text.input_ids == self.tokenizer.pad_token_id, -100)         
+        decoder_targets[:,:self.prompt_length] = -100
+     
+        decoder_output = self.text_decoder(text.input_ids, 
+                                           attention_mask = text.attention_mask, 
+                                           encoder_hidden_states = image_embeds,
+                                           encoder_attention_mask = image_atts,                  
+                                           labels = decoder_targets,
+                                           return_dict = True,   
+                                          )   
+        loss_lm = decoder_output.loss
+        
+        return loss_lm
+    
+    def generate(self, image, sample=False, num_beams=3, max_length=30, min_length=10, top_p=0.9, repetition_penalty=1.0):
+        image_embeds = self.visual_encoder(image)
+
+        if not sample:
+            image_embeds = image_embeds.repeat_interleave(num_beams,dim=0)
+            
+        image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)
+        model_kwargs = {"encoder_hidden_states": image_embeds, "encoder_attention_mask":image_atts}
+        
+        prompt = [self.prompt] * image.size(0)
+        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(image.device) 
+        input_ids[:,0] = self.tokenizer.bos_token_id
+        input_ids = input_ids[:, :-1] 
+
+        if sample:
+            #nucleus sampling
+            outputs = self.text_decoder.generate(input_ids=input_ids,
+                                                  max_length=max_length,
+                                                  min_length=min_length,
+                                                  do_sample=True,
+                                                  top_p=top_p,
+                                                  num_return_sequences=1,
+                                                  eos_token_id=self.tokenizer.sep_token_id,
+                                                  pad_token_id=self.tokenizer.pad_token_id, 
+                                                  repetition_penalty=1.1,                                            
+                                                  **model_kwargs)
+        else:
+            #beam search
+            outputs = self.text_decoder.generate(input_ids=input_ids,
+                                                  max_length=max_length,
+                                                  min_length=min_length,
+                                                  num_beams=num_beams,
+                                                  eos_token_id=self.tokenizer.sep_token_id,
+                                                  pad_token_id=self.tokenizer.pad_token_id,     
+                                                  repetition_penalty=repetition_penalty,
+                                                  **model_kwargs)            
+            
+        captions = []    
+        for output in outputs:
+            caption = self.tokenizer.decode(output, skip_special_tokens=True)    
+            captions.append(caption[len(self.prompt):])
+        return captions
+    
+
+        
+        
         

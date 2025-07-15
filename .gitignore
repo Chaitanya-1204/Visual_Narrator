@@ -201,4 +201,5 @@ val_data.json
 play.ipynb
 vit_opt350M.log
 experimentation_1/vit_opt350M_best_model.pt
-
+model.pt
+pycocoevalcap/

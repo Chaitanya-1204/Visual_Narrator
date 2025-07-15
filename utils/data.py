@@ -1,38 +1,31 @@
 import sys
 import os
-
+import logging
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PIL import Image
-import os, json, random
+import  json, random
+
 from torchvision import transforms
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset, DataLoader, random_split
 import torch
+from torchvision.transforms.functional import InterpolationMode
+
 from utils.all_utils import build_json_data
-import logging
-
-logging.basicConfig(
-    filename="vit_opt350M.log",
-    filemode="a",
-    format="\n%(asctime)s | %(levelname)s\n%(message)s\n" + "-"*80,
-    level=logging.INFO
-)
-
-# Get root directory of project
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from utils.randomaugument import RandomAugment
 
 
 class CocoCaptionDataset(Dataset):
     
-    def __init__(self, json_path, image_dir, tokenizer, transform=None, max_length=64):
+    def __init__(self, json_path, image_dir ,prompt = "" , transform=None, max_length=64):
         
         with open(json_path, 'r') as f:
             self.data = json.load(f)
             
-        
         self.image_dir = image_dir
-        self.tokenizer = tokenizer
+        self.prompt = prompt
+        
         self.transform = transform
         self.max_length = max_length
 
@@ -52,52 +45,51 @@ class CocoCaptionDataset(Dataset):
            
         # Tokenizing the caption    
         caption = item['caption']
-        tokenized = self.tokenizer(caption, padding="max_length", 
-                                   truncation=True,
-                                   max_length=self.max_length, 
-                                   return_tensors="pt")
-        
 
-        assert hasattr(image, "shape") and image.shape == (3, 224, 224), f"Image shape mismatch: {getattr(image, 'shape', None)}"
-        assert tokenized["input_ids"].shape == (1, self.max_length), f"Input ID shape: {tokenized['input_ids'].shape}"
-        
-        
         return {
-            "pixel_values": image,
-            "input_ids": tokenized["input_ids"].squeeze(0),
-            "attention_mask": tokenized["attention_mask"].squeeze(0),
+            "image": image,
             "caption": caption
         }
         
-def get_dataloaders(decoder_model_name):
+def get_dataloaders(config , min_scale = 0.5):
     
+    logging.info("Preparing dataloaders with image size %d", config['image_size'])
     # Geting the JSON files
     get_json_file()
     
     # Defining the image transformations
-    image_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+    normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+
+    transform_train = transforms.Compose([                        
+            transforms.RandomResizedCrop(config['image_size'],scale=(min_scale, 1.0),interpolation=InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            RandomAugment(2,5,isPIL=True,augs=['Identity','AutoContrast','Brightness','Sharpness','Equalize',
+                                              'ShearX', 'ShearY', 'TranslateX', 'TranslateY', 'Rotate']),     
+            transforms.ToTensor(),
+            normalize,
+    ])   
+    
+    transform_test = transforms.Compose([
+        transforms.Resize((config['image_size'],config['image_size']),interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
-    ])
-    
-    # Loading the tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(decoder_model_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    
+        normalize,
+        ])  
+       
     # Creating the datasets
     train_dataset = CocoCaptionDataset(
         json_path="train_data.json",
         image_dir="coco/images/train2014",
-        tokenizer=tokenizer,
-        transform=image_transform
+        prompt = config["prompt"],
+        transform=transform_train
     )
+    logging.info("Train dataset size: %d", len(train_dataset))
 
     val_dataset = CocoCaptionDataset(
         json_path="val_data.json",
         image_dir="coco/images/val2014",
-        tokenizer=tokenizer,
-        transform=image_transform  
+        transform=transform_test
     )
+    logging.info("Validation dataset size: %d", len(val_dataset))
     
     # Splitting the validation dataset into validation and test set
     generator = torch.Generator().manual_seed(42)
@@ -105,18 +97,33 @@ def get_dataloaders(decoder_model_name):
     val_size = len(val_dataset) // 2
     test_size = len(val_dataset) - val_size
     val_subset, test_subset = random_split(val_dataset, [val_size, test_size] , generator=generator)
-    
+    logging.info("Validation subset size: %d", len(val_subset))
+    logging.info("Test subset size: %d", len(test_subset))
     
     # Creating the dataloaders
     train_dataloader = DataLoader(train_dataset, 
-                                  batch_size=32, 
+                                  batch_size=16, 
                                   shuffle=True, 
                                   num_workers=4, 
                                   pin_memory=True, 
                                   persistent_workers=True)
-    val_dataloader = DataLoader(val_subset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
-    test_dataloader = DataLoader(test_subset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
-    return train_dataloader, val_dataloader, test_dataloader , tokenizer
+    
+    val_dataloader = DataLoader(val_subset, 
+                                batch_size=16, 
+                                shuffle=False, 
+                                num_workers=4, 
+                                pin_memory=True, 
+                                persistent_workers=True)
+    
+    test_dataloader = DataLoader(test_subset, 
+                                 batch_size=16, 
+                                 shuffle=False, 
+                                 num_workers=4, 
+                                 pin_memory=True, 
+                                 persistent_workers=True)
+    
+    logging.info("Dataloaders created and ready.")
+    return train_dataloader, val_dataloader, test_dataloader 
 
 def get_json_file():
     
@@ -127,11 +134,13 @@ def get_json_file():
     val_output_path = "val_data.json"
 
     if os.path.exists(train_output_path):
-        logging.info("Training Data Exists")
+        logging.info("Training data already exists at %s", train_output_path)
     else:
         build_json_data(annotations_train_file_path , train_output_path)
+        logging.info("Built and saved data to %s", train_output_path)
 
     if os.path.exists(val_output_path):
-        logging.info("Validation Data Exists")
+        logging.info("Validation data already exists at %s", val_output_path)
     else:
         build_json_data(annotations_val_file_path , val_output_path)
+        logging.info("Built and saved data to %s", val_output_path)
