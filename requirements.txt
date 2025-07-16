@@ -7,3 +7,5 @@ tqdm
 opencv-python
 nltk
 matplotlib
+Pillow
+google-cloud-texttospeech
